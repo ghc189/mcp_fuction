@@ -1,0 +1,9 @@
+.deps/
+.pip-cache/
+.tmp/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
