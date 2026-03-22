@@ -9,60 +9,11 @@
 - 删除音色
 - 用复刻音色做语音合成
 
-## 我替你选的模型
-
-推荐模型：`cosyvoice-v3.5-plus`
-
-原因：
-
-- 阿里云官方“模型选型”里，对“品牌形象、专属声音、扩展系统音色等语音定制（基于音频样本）”直接推荐 `cosyvoice-v3.5-plus`
-- 你现在走的是百炼 `cn-beijing` 路线，而 `cosyvoice-v3.5-plus` 正好仅在北京地域可用
-- `cosyvoice-v3.5-flash` 更偏低成本、低延迟客服/语音助手场景，不是官方首推的高还原声音克隆模型
-
-## 工具列表
-
-- `create_voice_clone`
-- `query_voice`
-- `wait_for_voice_ready`
-- `list_voices`
-- `delete_voice`
-- `synthesize_with_cloned_voice`
-
-## 前提条件
-
-1. 你已经在阿里云百炼北京地域开通模型服务
-2. 你已经拿到北京地域 API Key
-3. 你有一个公网可访问的音频 URL
-4. 录音建议使用官方推荐规格：16-bit / 16kHz / 时长 10 到 200 秒
 
 ## 本地启动
 
 1. 安装依赖
 
-```powershell
-cd C:\Users\29932\bailian-voice-clone-mcp
-python -m pip install -r requirements.txt
-```
-
-2. 配置环境变量
-
-```powershell
-$env:DASHSCOPE_API_KEY="sk-xxxx"
-$env:DASHSCOPE_REGION="cn-beijing"
-$env:BAILIAN_TTS_MODEL="cosyvoice-v3.5-plus"
-```
-
-3. 启动 MCP
-
-```powershell
-python server.py
-```
-
-4. 做一次本地冒烟测试
-
-```powershell
-python smoke_test.py
-```
 
 ## Path B：部署到阿里云 Function AI
 
