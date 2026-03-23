@@ -128,3 +128,46 @@ https://xxxx.cn-beijing.fcapp.run/sse
 - `audio_url` 必须公网可访问
 - `prefix` 建议只用小写字母、数字、下划线，长度不超过 10
 - `synthesize_with_cloned_voice` 默认会把音频落到临时目录；在云端想长期保存，下一步建议接 OSS
+
+## Local Recording Support
+
+The MCP now supports two additional tools for local recordings:
+
+- `create_qwen_voice_clone_from_audio_base64`
+- `create_qwen_voice_clone_from_local_file`
+
+How to choose:
+
+- If you deploy the MCP to Function AI / Bailian, use `create_qwen_voice_clone_from_audio_base64`.
+  This is the remote-friendly path because you can pass audio as base64 or a full Data URL.
+- If you run the MCP locally with `stdio`, use `create_qwen_voice_clone_from_local_file`.
+
+Important:
+
+- `CosyVoice` clone tools still require a public `audio_url`.
+- Direct local-file clone support is implemented with `Qwen3 TTS VC`, because the official
+  Qwen voice enrollment API supports `audio.data` while the CosyVoice clone API is documented
+  around public URL input.
+
+Example for remote base64 mode:
+
+```json
+{
+  "audio_base64_or_data_url": "data:audio/wav;base64,AAA...",
+  "preferred_name": "demo_voice_01",
+  "audio_mime_type": "audio/wav",
+  "target_model": "qwen3-tts-vc-2026-01-22",
+  "region": "cn-beijing"
+}
+```
+
+Example for local file mode:
+
+```json
+{
+  "local_file_path": "C:\\Users\\29932\\Desktop\\sample.wav",
+  "preferred_name": "demo_voice_01",
+  "target_model": "qwen3-tts-vc-2026-01-22",
+  "region": "cn-beijing"
+}
+```

@@ -1,5 +1,6 @@
 import base64
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -22,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 APP_NAME = "bailian-voice-clone-mcp"
 DEFAULT_REGION = os.getenv("DASHSCOPE_REGION", "cn-beijing")
 DEFAULT_TARGET_MODEL = os.getenv("BAILIAN_TTS_MODEL", "cosyvoice-v3.5-plus")
+DEFAULT_QWEN_VC_MODEL = os.getenv("BAILIAN_QWEN_VC_MODEL", "qwen3-tts-vc-2026-01-22")
 DEFAULT_INLINE_AUDIO_LIMIT = int(os.getenv("INLINE_AUDIO_BASE64_LIMIT", "300000"))
 
 HTTP_ENDPOINTS = {
@@ -32,6 +34,11 @@ HTTP_ENDPOINTS = {
 WS_ENDPOINTS = {
     "cn-beijing": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
     "intl-singapore": "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference",
+}
+
+HTTP_BASE_ENDPOINTS = {
+    "cn-beijing": "https://dashscope.aliyuncs.com/api/v1",
+    "intl-singapore": "https://dashscope-intl.aliyuncs.com/api/v1",
 }
 
 READY_STATUSES = {"OK", "SUCCESS", "SUCCEEDED"}
@@ -74,6 +81,11 @@ def _ws_endpoint(region: str | None) -> str:
     return WS_ENDPOINTS[normalized]
 
 
+def _http_base_endpoint(region: str | None) -> str:
+    normalized = _normalize_region(region)
+    return HTTP_BASE_ENDPOINTS[normalized]
+
+
 def _validate_prefix(prefix: str) -> str:
     value = prefix.strip()
     if not re.fullmatch(r"[a-z0-9_]{1,10}", value):
@@ -111,6 +123,74 @@ def _post_customization(payload: dict[str, Any], region: str | None) -> dict[str
     if isinstance(data, dict) and data.get("code"):
         raise RuntimeError(f"DashScope 返回错误: {data.get('code')} - {data.get('message')}")
     return data
+
+
+def _validate_preferred_name(preferred_name: str) -> str:
+    value = preferred_name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,16}", value):
+        raise ValueError("preferred_name only allows letters, numbers, underscore, max length 16.")
+    return value
+
+
+def _guess_audio_mime_type(file_name: str, fallback: str = "audio/mpeg") -> str:
+    guessed, _ = mimetypes.guess_type(file_name)
+    return guessed or fallback
+
+
+def _ensure_audio_data_url(audio_base64_or_data_url: str, audio_mime_type: str) -> str:
+    value = audio_base64_or_data_url.strip()
+    if not value:
+        raise ValueError("audio_base64_or_data_url cannot be empty.")
+    if value.startswith("data:"):
+        return value
+    compact = re.sub(r"\s+", "", value)
+    return f"data:{audio_mime_type};base64,{compact}"
+
+
+def _read_local_audio_as_data_url(local_file_path: str, audio_mime_type: str = "") -> tuple[str, str, int]:
+    path = Path(local_file_path.strip())
+    if not path.exists():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+    payload = path.read_bytes()
+    mime_type = audio_mime_type.strip() or _guess_audio_mime_type(path.name)
+    data_url = f"data:{mime_type};base64,{base64.b64encode(payload).decode('ascii')}"
+    return data_url, mime_type, len(payload)
+
+
+def _create_qwen_voice(
+    audio_data_url: str,
+    preferred_name: str,
+    target_model: str,
+    region: str,
+    text: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    payload_input: dict[str, Any] = {
+        "action": "create",
+        "target_model": target_model,
+        "preferred_name": _validate_preferred_name(preferred_name),
+        "audio": {"data": audio_data_url},
+    }
+    if text.strip():
+        payload_input["text"] = text.strip()
+    if language.strip():
+        payload_input["language"] = language.strip()
+
+    payload = {
+        "model": "qwen-voice-enrollment",
+        "input": payload_input,
+    }
+    data = _post_customization(payload, region)
+    output = data.get("output", {})
+    return {
+        "message": "Qwen voice clone created.",
+        "voice": output.get("voice"),
+        "target_model": output.get("target_model", target_model),
+        "request_id": data.get("request_id"),
+        "usage": data.get("usage", {}),
+        "region": _normalize_region(region),
+        "raw_output": output,
+    }
 
 
 def _extract_voice_status(payload: dict[str, Any]) -> str | None:
@@ -176,6 +256,76 @@ def create_voice_clone(
         "region": _normalize_region(region),
         "raw_output": output,
     }
+
+
+@mcp.tool()
+def create_qwen_voice_clone_from_audio_base64(
+    audio_base64_or_data_url: str,
+    preferred_name: str,
+    audio_mime_type: str = "audio/mpeg",
+    target_model: str = DEFAULT_QWEN_VC_MODEL,
+    region: str = DEFAULT_REGION,
+    text: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    """
+    Create a Qwen voice clone from base64 or a full Data URL.
+
+    This is the remote-friendly option for Bailian / Function AI, because the
+    caller can pass audio content directly without a public URL.
+    """
+    data_url = _ensure_audio_data_url(
+        audio_base64_or_data_url=audio_base64_or_data_url,
+        audio_mime_type=audio_mime_type.strip() or "audio/mpeg",
+    )
+    result = _create_qwen_voice(
+        audio_data_url=data_url,
+        preferred_name=preferred_name,
+        target_model=target_model,
+        region=region,
+        text=text,
+        language=language,
+    )
+    result["audio_input_mode"] = "base64_or_data_url"
+    result["audio_mime_type"] = audio_mime_type.strip() or "audio/mpeg"
+    return result
+
+
+@mcp.tool()
+def create_qwen_voice_clone_from_local_file(
+    local_file_path: str,
+    preferred_name: str,
+    audio_mime_type: str = "",
+    target_model: str = DEFAULT_QWEN_VC_MODEL,
+    region: str = DEFAULT_REGION,
+    text: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    """
+    Create a Qwen voice clone from a local audio file path.
+
+    Note:
+    - Best for local stdio deployment.
+    - In Function AI, the path is resolved inside the cloud container, not on
+      your personal computer.
+    """
+    data_url, resolved_mime_type, audio_bytes = _read_local_audio_as_data_url(
+        local_file_path=local_file_path,
+        audio_mime_type=audio_mime_type,
+    )
+    result = _create_qwen_voice(
+        audio_data_url=data_url,
+        preferred_name=preferred_name,
+        target_model=target_model,
+        region=region,
+        text=text,
+        language=language,
+    )
+    result["audio_input_mode"] = "local_file"
+    result["audio_mime_type"] = resolved_mime_type
+    result["audio_bytes"] = audio_bytes
+    result["source_path"] = str(Path(local_file_path).expanduser().resolve())
+    return result
 
 
 @mcp.tool()
