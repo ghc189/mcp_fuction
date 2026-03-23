@@ -135,12 +135,16 @@ The MCP now supports two additional tools for local recordings:
 
 - `create_qwen_voice_clone_from_audio_base64`
 - `create_qwen_voice_clone_from_local_file`
+- `create_qwen_voice_clone_from_video_url_segment`
+- `create_qwen_voice_clone_from_local_video_segment`
 
 How to choose:
 
 - If you deploy the MCP to Function AI / Bailian, use `create_qwen_voice_clone_from_audio_base64`.
   This is the remote-friendly path because you can pass audio as base64 or a full Data URL.
 - If you run the MCP locally with `stdio`, use `create_qwen_voice_clone_from_local_file`.
+- If the voice is inside a video, use one of the video segment tools and specify the
+  exact start/end time of the speaker you want to clone.
 
 Important:
 
@@ -171,6 +175,41 @@ Example for local file mode:
   "region": "cn-beijing"
 }
 ```
+
+Example for video URL mode:
+
+```json
+{
+  "video_url": "https://your-public-video-url/demo.mp4",
+  "preferred_name": "demo_voice_01",
+  "start_time": "00:01:15",
+  "end_time": "00:01:42",
+  "speech_enhancement": true,
+  "target_model": "qwen3-tts-vc-2026-01-22",
+  "region": "cn-beijing"
+}
+```
+
+Example for local video mode:
+
+```json
+{
+  "local_video_path": "C:\\Users\\29932\\Desktop\\demo.mp4",
+  "preferred_name": "demo_voice_01",
+  "start_time": "75",
+  "end_time": "102",
+  "speech_enhancement": true,
+  "target_model": "qwen3-tts-vc-2026-01-22",
+  "region": "cn-beijing"
+}
+```
+
+Video notes:
+
+- `start_time` and `end_time` support `seconds` or `HH:MM:SS[.ms]`
+- `speech_enhancement=true` applies a lightweight speech-focused filter chain
+- This improves spoken voice clarity, but it does not fully separate vocals from background music
+- For best cloning quality, choose a segment where the target speaker is clear and background music is weaker
 
 ## LobeHub HTTP Mode
 

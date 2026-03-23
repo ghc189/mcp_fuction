@@ -19,6 +19,8 @@ def main() -> None:
         "create_voice_clone",
         "create_qwen_voice_clone_from_audio_base64",
         "create_qwen_voice_clone_from_local_file",
+        "create_qwen_voice_clone_from_video_url_segment",
+        "create_qwen_voice_clone_from_local_video_segment",
         "query_voice",
         "wait_for_voice_ready",
         "list_voices",

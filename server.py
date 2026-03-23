@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -239,6 +240,130 @@ def _default_output_path(voice_id: str, suffix: str) -> str:
     return str(Path(tempfile.gettempdir()) / file_name)
 
 
+def _parse_time_to_seconds(value: str) -> float:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("time value cannot be empty.")
+    if re.fullmatch(r"\d+(\.\d+)?", raw):
+        return float(raw)
+
+    parts = raw.split(":")
+    if not 1 <= len(parts) <= 3:
+        raise ValueError("time format must be seconds or HH:MM:SS[.ms].")
+    try:
+        parts = [part.strip() for part in parts]
+        if len(parts) == 3:
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            seconds = float(parts[2])
+        elif len(parts) == 2:
+            hours = 0.0
+            minutes = float(parts[0])
+            seconds = float(parts[1])
+        else:
+            hours = 0.0
+            minutes = 0.0
+            seconds = float(parts[0])
+    except ValueError as exc:
+        raise ValueError("time format must be seconds or HH:MM:SS[.ms].") from exc
+
+    total = hours * 3600 + minutes * 60 + seconds
+    if total < 0:
+        raise ValueError("time must be >= 0.")
+    return total
+
+
+def _normalize_time_range(start_time: str, end_time: str) -> tuple[float, float]:
+    start_seconds = _parse_time_to_seconds(start_time)
+    end_seconds = _parse_time_to_seconds(end_time)
+    if end_seconds <= start_seconds:
+        raise ValueError("end_time must be greater than start_time.")
+    return start_seconds, end_seconds
+
+
+def _video_source_to_ffmpeg_input(source: str, source_kind: str) -> str:
+    clean = source.strip()
+    if not clean:
+        raise ValueError("video source cannot be empty.")
+    if source_kind == "url":
+        return clean
+    if source_kind == "local_file":
+        path = Path(clean).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Video file not found: {path}")
+        return str(path.resolve())
+    raise ValueError("source_kind must be 'url' or 'local_file'.")
+
+
+def _speech_enhancement_filter(speech_enhancement: bool) -> str:
+    if not speech_enhancement:
+        return "aresample=16000"
+    return ",".join(
+        [
+            "highpass=f=80",
+            "lowpass=f=7000",
+            "afftdn=nf=-25",
+            "speechnorm=e=6.25:r=0.0001:l=1",
+            "aresample=16000",
+        ]
+    )
+
+
+def _extract_audio_segment_from_video(
+    source: str,
+    source_kind: str,
+    start_time: str,
+    end_time: str,
+    speech_enhancement: bool,
+) -> dict[str, Any]:
+    import imageio_ffmpeg
+
+    start_seconds, end_seconds = _normalize_time_range(start_time, end_time)
+    ffmpeg_input = _video_source_to_ffmpeg_input(source, source_kind)
+    output_path = Path(tempfile.gettempdir()) / f"voice-segment-{uuid.uuid4().hex[:8]}.wav"
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    filter_chain = _speech_enhancement_filter(speech_enhancement)
+
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-to",
+        f"{end_seconds:.3f}",
+        "-i",
+        ffmpeg_input,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-sample_fmt",
+        "s16",
+        "-af",
+        filter_chain,
+        str(output_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not output_path.exists():
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"ffmpeg extract failed: {detail[-2000:]}")
+
+    payload = output_path.read_bytes()
+    return {
+        "audio_bytes": len(payload),
+        "audio_mime_type": "audio/wav",
+        "audio_data_url": f"data:audio/wav;base64,{base64.b64encode(payload).decode('ascii')}",
+        "saved_path": str(output_path),
+        "start_seconds": round(start_seconds, 3),
+        "end_seconds": round(end_seconds, 3),
+        "duration_seconds": round(end_seconds - start_seconds, 3),
+        "speech_enhancement": speech_enhancement,
+        "source_kind": source_kind,
+        "source": source.strip(),
+    }
+
+
 @mcp.tool()
 def create_voice_clone(
     audio_url: str,
@@ -345,6 +470,84 @@ def create_qwen_voice_clone_from_local_file(
     result["audio_mime_type"] = resolved_mime_type
     result["audio_bytes"] = audio_bytes
     result["source_path"] = str(Path(local_file_path).expanduser().resolve())
+    return result
+
+
+@mcp.tool()
+def create_qwen_voice_clone_from_video_url_segment(
+    video_url: str,
+    preferred_name: str,
+    start_time: str,
+    end_time: str,
+    speech_enhancement: bool = True,
+    target_model: str = DEFAULT_QWEN_VC_MODEL,
+    region: str = DEFAULT_REGION,
+    text: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    """
+    Create a Qwen voice clone from a public video URL and a selected time range.
+
+    This is the recommended remote-friendly workflow when the voice you want is
+    inside a video.
+    """
+    extracted = _extract_audio_segment_from_video(
+        source=video_url,
+        source_kind="url",
+        start_time=start_time,
+        end_time=end_time,
+        speech_enhancement=speech_enhancement,
+    )
+    result = _create_qwen_voice(
+        audio_data_url=extracted["audio_data_url"],
+        preferred_name=preferred_name,
+        target_model=target_model,
+        region=region,
+        text=text,
+        language=language,
+    )
+    result["audio_input_mode"] = "video_url_segment"
+    result["segment"] = extracted
+    return result
+
+
+@mcp.tool()
+def create_qwen_voice_clone_from_local_video_segment(
+    local_video_path: str,
+    preferred_name: str,
+    start_time: str,
+    end_time: str,
+    speech_enhancement: bool = True,
+    target_model: str = DEFAULT_QWEN_VC_MODEL,
+    region: str = DEFAULT_REGION,
+    text: str = "",
+    language: str = "",
+) -> dict[str, Any]:
+    """
+    Create a Qwen voice clone from a local video file and a selected time range.
+
+    Note:
+    - Best for local stdio deployment.
+    - In Function AI, the path is resolved inside the cloud container, not on
+      your personal computer.
+    """
+    extracted = _extract_audio_segment_from_video(
+        source=local_video_path,
+        source_kind="local_file",
+        start_time=start_time,
+        end_time=end_time,
+        speech_enhancement=speech_enhancement,
+    )
+    result = _create_qwen_voice(
+        audio_data_url=extracted["audio_data_url"],
+        preferred_name=preferred_name,
+        target_model=target_model,
+        region=region,
+        text=text,
+        language=language,
+    )
+    result["audio_input_mode"] = "local_video_segment"
+    result["segment"] = extracted
     return result
 
 
