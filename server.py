@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error, parse, request
 
 APP_ROOT = Path(__file__).resolve().parent
 for extra_dir in ("pywin32_system32", "win32", str(Path("win32") / "lib")):
@@ -107,6 +107,10 @@ def _http_base_endpoint(region: str | None) -> str:
     return HTTP_BASE_ENDPOINTS[normalized]
 
 
+def _multimodal_generation_endpoint(region: str | None) -> str:
+    return f"{_http_base_endpoint(region)}/services/aigc/multimodal-generation/generation"
+
+
 def _validate_prefix(prefix: str) -> str:
     value = prefix.strip()
     if not re.fullmatch(r"[a-z0-9_]{1,10}", value):
@@ -158,6 +162,70 @@ def _resolve_synthesis_target_model(voice_id: str, target_model: str) -> str:
         )
 
     return requested_model or DEFAULT_TARGET_MODEL
+
+
+def _post_json(endpoint: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=120) as resp:
+            content = resp.read().decode("utf-8")
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"DashScope HTTP {exc.code}: {detail}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"璇锋眰 DashScope 澶辫触: {exc.reason}") from exc
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"DashScope 杩斿洖浜嗘棤娉曡В鏋愮殑 JSON: {content[:500]}") from exc
+
+    if isinstance(data, dict) and data.get("code"):
+        raise RuntimeError(f"DashScope 杩斿洖閿欒: {data.get('code')} - {data.get('message')}")
+    return data
+
+
+def _infer_qwen_language_type(text: str) -> str:
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "Chinese"
+    if re.search(r"[A-Za-z]", text):
+        return "English"
+    return "Chinese"
+
+
+def _download_binary(url: str) -> tuple[bytes, str]:
+    req = request.Request(url, method="GET")
+    try:
+        with request.urlopen(req, timeout=120) as resp:
+            payload = resp.read()
+            content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Download HTTP {exc.code}: {detail}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"涓嬭浇闊抽澶辫触: {exc.reason}") from exc
+
+    return payload, content_type
+
+
+def _audio_suffix_from_url_or_type(audio_url: str, content_type: str) -> str:
+    path = parse.urlparse(audio_url).path
+    suffix = Path(path).suffix
+    if suffix:
+        return suffix
+    guessed = mimetypes.guess_extension(content_type or "")
+    if guessed:
+        return guessed
+    return ".mp3"
 
 
 def _post_customization(payload: dict[str, Any], region: str | None) -> dict[str, Any]:
@@ -293,6 +361,47 @@ def _configure_dashscope(region: str | None) -> None:
 
     dashscope.api_key = _require_api_key()
     dashscope.base_websocket_api_url = _ws_endpoint(region)
+
+
+def _synthesize_qwen_voice_http(
+    text: str,
+    voice_id: str,
+    target_model: str,
+    region: str,
+) -> dict[str, Any]:
+    api_key = _require_api_key()
+    endpoint = _multimodal_generation_endpoint(region)
+    payload = {
+        "model": target_model,
+        "input": {
+            "text": text,
+            "voice": voice_id,
+            "language_type": _infer_qwen_language_type(text),
+        },
+    }
+    data = _post_json(endpoint, payload, api_key)
+    output = data.get("output", {}) if isinstance(data, dict) else {}
+    audio = output.get("audio", {}) if isinstance(output, dict) else {}
+    audio_url = audio.get("url") if isinstance(audio, dict) else None
+    if not audio_url:
+        raise RuntimeError(
+            f"Qwen TTS did not return output.audio.url. request_id={data.get('request_id')}, output={output}"
+        )
+
+    audio_bytes, content_type = _download_binary(audio_url)
+    if not audio_bytes:
+        raise RuntimeError(
+            f"Qwen TTS returned an empty audio download. request_id={data.get('request_id')}, audio_url={audio_url}"
+        )
+
+    return {
+        "audio": audio_bytes,
+        "request_id": data.get("request_id"),
+        "audio_url": audio_url,
+        "content_type": content_type or "audio/mpeg",
+        "language_type": payload["input"]["language_type"],
+        "raw_output": output,
+    }
 
 
 def _default_output_path(voice_id: str, suffix: str) -> str:
@@ -774,32 +883,63 @@ def synthesize_with_cloned_voice(
     inline_base64: bool = False,
 ) -> dict[str, Any]:
     """
-    使用已复刻成功的 voice_id 进行语音合成。
+    Synthesize speech with a cloned voice.
 
-    说明:
-    - `voice_id` 必须来自同一 target_model。
-    - 默认会把音频保存到系统临时目录。
-    - 如果 inline_base64=true，或音频较小，会返回 base64 方便调试或二次上传。
+    Supported voice sources:
+    - CosyVoice voice_id returned by create_voice_clone
+    - Qwen voice_id returned by create_qwen_voice_clone_*
+
+    Notes:
+    - Qwen voice clones are ready immediately. Do not call query_voice or
+      wait_for_voice_ready before synthesis.
+    - If a Qwen voice_id is paired with the default CosyVoice target_model,
+      this tool auto-switches to the default Qwen VC model.
     """
     clean_text = text.strip()
     if not clean_text:
-        raise ValueError("text 不能为空。")
+        raise ValueError("text cannot be empty.")
 
     clean_voice_id = voice_id.strip()
     if not clean_voice_id:
         raise ValueError("voice_id cannot be empty.")
     resolved_target_model = _resolve_synthesis_target_model(clean_voice_id, target_model)
 
-    _configure_dashscope(region)
+    request_id: str | None = None
+    first_package_delay_ms: Any = None
+    raw_output: Any = None
+    audio_url: str | None = None
+    content_type = "audio/mpeg"
 
-    from dashscope.audio.tts_v2 import SpeechSynthesizer
+    if _is_qwen_voice_id(clean_voice_id):
+        qwen_result = _synthesize_qwen_voice_http(
+            text=clean_text,
+            voice_id=clean_voice_id,
+            target_model=resolved_target_model,
+            region=region,
+        )
+        audio = qwen_result["audio"]
+        request_id = qwen_result.get("request_id")
+        raw_output = qwen_result.get("raw_output")
+        audio_url = qwen_result.get("audio_url")
+        content_type = qwen_result.get("content_type") or content_type
+        output_suffix = _audio_suffix_from_url_or_type(audio_url or "", content_type)
+    else:
+        _configure_dashscope(region)
 
-    synthesizer = SpeechSynthesizer(model=resolved_target_model, voice=clean_voice_id)
-    audio = synthesizer.call(clean_text)
-    if not isinstance(audio, (bytes, bytearray)):
-        raise RuntimeError("语音合成返回了空音频。")
+        from dashscope.audio.tts_v2 import SpeechSynthesizer
 
-    output_path = save_path.strip() or _default_output_path(clean_voice_id, ".mp3")
+        synthesizer = SpeechSynthesizer(model=resolved_target_model, voice=clean_voice_id)
+        audio = synthesizer.call(clean_text)
+        if not isinstance(audio, (bytes, bytearray)) or not audio:
+            raise RuntimeError("CosyVoice synthesis returned empty audio.")
+        request_id = synthesizer.get_last_request_id()
+        first_package_delay_ms = synthesizer.get_first_package_delay()
+        output_suffix = ".mp3"
+
+    if not isinstance(audio, (bytes, bytearray)) or not audio:
+        raise RuntimeError("Speech synthesis returned empty audio.")
+
+    output_path = save_path.strip() or _default_output_path(clean_voice_id, output_suffix)
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_bytes(audio)
@@ -810,17 +950,21 @@ def synthesize_with_cloned_voice(
         "region": _normalize_region(region),
         "saved_path": str(output_file),
         "audio_bytes": len(audio),
-        "request_id": synthesizer.get_last_request_id(),
-        "first_package_delay_ms": synthesizer.get_first_package_delay(),
-        "content_type": "audio/mpeg",
+        "request_id": request_id,
+        "content_type": content_type,
     }
+    if first_package_delay_ms is not None:
+        result["first_package_delay_ms"] = first_package_delay_ms
+    if audio_url:
+        result["audio_url"] = audio_url
+    if raw_output is not None:
+        result["raw_output"] = raw_output
     if inline_base64 or len(audio) <= DEFAULT_INLINE_AUDIO_LIMIT:
         result["audio_base64"] = base64.b64encode(audio).decode("ascii")
     else:
         result["audio_base64_omitted"] = True
         result["inline_limit_bytes"] = DEFAULT_INLINE_AUDIO_LIMIT
     return result
-
 
 @contextlib.asynccontextmanager
 async def app_lifespan(_: Starlette):
