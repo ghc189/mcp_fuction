@@ -1,3 +1,4 @@
+import contextlib
 import base64
 import json
 import mimetypes
@@ -18,6 +19,10 @@ for extra_dir in ("pywin32_system32", "win32", str(Path("win32") / "lib")):
         sys.path.insert(0, str(candidate))
 
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Mount
+import uvicorn
 
 
 APP_NAME = "bailian-voice-clone-mcp"
@@ -25,6 +30,14 @@ DEFAULT_REGION = os.getenv("DASHSCOPE_REGION", "cn-beijing")
 DEFAULT_TARGET_MODEL = os.getenv("BAILIAN_TTS_MODEL", "cosyvoice-v3.5-plus")
 DEFAULT_QWEN_VC_MODEL = os.getenv("BAILIAN_QWEN_VC_MODEL", "qwen3-tts-vc-2026-01-22")
 DEFAULT_INLINE_AUDIO_LIMIT = int(os.getenv("INLINE_AUDIO_BASE64_LIMIT", "300000"))
+DEFAULT_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
+DEFAULT_HTTP_HOST = os.getenv("MCP_HOST", "0.0.0.0").strip() or "0.0.0.0"
+DEFAULT_HTTP_PORT = int(
+    os.getenv("MCP_PORT")
+    or os.getenv("PORT")
+    or os.getenv("FC_SERVER_PORT")
+    or "8080"
+)
 
 HTTP_ENDPOINTS = {
     "cn-beijing": "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization",
@@ -44,7 +57,12 @@ HTTP_BASE_ENDPOINTS = {
 READY_STATUSES = {"OK", "SUCCESS", "SUCCEEDED"}
 FAILED_STATUSES = {"FAILED", "FAIL", "ERROR"}
 
-mcp = FastMCP(APP_NAME)
+mcp = FastMCP(
+    APP_NAME,
+    stateless_http=True,
+    json_response=True,
+    streamable_http_path="/",
+)
 
 
 def _require_api_key() -> str:
@@ -508,5 +526,25 @@ def synthesize_with_cloned_voice(
     return result
 
 
+@contextlib.asynccontextmanager
+async def app_lifespan(_: Starlette):
+    async with mcp.session_manager.run():
+        yield
+
+
+http_app = CORSMiddleware(
+    Starlette(
+        routes=[Mount("/", app=mcp.streamable_http_app())],
+        lifespan=app_lifespan,
+    ),
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    if DEFAULT_TRANSPORT == "streamable-http":
+        uvicorn.run(http_app, host=DEFAULT_HTTP_HOST, port=DEFAULT_HTTP_PORT)
+    else:
+        mcp.run(transport="stdio")

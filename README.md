@@ -171,3 +171,49 @@ Example for local file mode:
   "region": "cn-beijing"
 }
 ```
+
+## LobeHub HTTP Mode
+
+LobeHub expects Streamable HTTP, not SSE.
+
+This project now supports both transports:
+
+- `MCP_TRANSPORT=stdio`
+  For local stdio use or Function AI MCP proxy mode.
+- `MCP_TRANSPORT=streamable-http`
+  For direct LobeHub integration.
+
+Recommended environment variables for direct LobeHub deployment:
+
+```env
+MCP_TRANSPORT=streamable-http
+MCP_HOST=0.0.0.0
+MCP_PORT=8080
+```
+
+Startup command for HTTP mode:
+
+```bash
+python server.py
+```
+
+LobeHub example config:
+
+```json
+{
+  "mcpServers": {
+    "voice-clone-mcp": {
+      "url": "https://your-domain.example.com/",
+      "type": "streamable-http",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Important:
+
+- For LobeHub, use the root HTTP URL of the deployed service, not the old `/sse` URL.
+- If you deploy this mode to Function AI, use a normal HTTP/Web service style deployment that exposes port `8080`.
