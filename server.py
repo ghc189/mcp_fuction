@@ -59,6 +59,8 @@ FAILED_STATUSES = {"FAILED", "FAIL", "ERROR"}
 
 mcp = FastMCP(
     APP_NAME,
+    host=DEFAULT_HTTP_HOST,
+    port=DEFAULT_HTTP_PORT,
     stateless_http=True,
     json_response=True,
     streamable_http_path="/mcp",
