@@ -61,7 +61,7 @@ mcp = FastMCP(
     APP_NAME,
     stateless_http=True,
     json_response=True,
-    streamable_http_path="/",
+    streamable_http_path="/mcp",
 )
 
 

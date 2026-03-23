@@ -204,6 +204,7 @@ LobeHub example config:
   "mcpServers": {
     "voice-clone-mcp": {
       "url": "https://your-domain.example.com/",
+      "url": "https://your-domain.example.com/mcp",
       "type": "streamable-http",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN"
@@ -215,5 +216,5 @@ LobeHub example config:
 
 Important:
 
-- For LobeHub, use the root HTTP URL of the deployed service, not the old `/sse` URL.
+- For LobeHub, use the `/mcp` HTTP URL of the deployed service, not the old `/sse` URL.
 - If you deploy this mode to Function AI, use a normal HTTP/Web service style deployment that exposes port `8080`.
