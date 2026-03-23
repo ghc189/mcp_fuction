@@ -184,7 +184,7 @@ Example for video URL mode:
   "preferred_name": "demo_voice_01",
   "start_time": "00:01:15",
   "end_time": "00:01:42",
-  "speech_enhancement": true,
+  "speech_enhancement": false,
   "target_model": "qwen3-tts-vc-2026-01-22",
   "region": "cn-beijing"
 }
@@ -198,7 +198,7 @@ Example for local video mode:
   "preferred_name": "demo_voice_01",
   "start_time": "75",
   "end_time": "102",
-  "speech_enhancement": true,
+  "speech_enhancement": false,
   "target_model": "qwen3-tts-vc-2026-01-22",
   "region": "cn-beijing"
 }
@@ -207,9 +207,10 @@ Example for local video mode:
 Video notes:
 
 - `start_time` and `end_time` support `seconds` or `HH:MM:SS[.ms]`
-- `speech_enhancement=true` applies a lightweight speech-focused filter chain
-- This improves spoken voice clarity, but it does not fully separate vocals from background music
-- For best cloning quality, choose a segment where the target speaker is clear and background music is weaker
+- Video extraction now keeps `24000 Hz` mono WAV by default to preserve more timbre detail for cloning
+- `speech_enhancement=false` is now the safer default when similarity matters most
+- Turn `speech_enhancement=true` on only when the source clip is noisy enough that intelligibility matters more than timbre fidelity
+- For best cloning quality, choose a `10-20s` segment where the target speaker is clear, continuous, and background music is as weak as possible
 
 ## Workflow By Clone Type
 

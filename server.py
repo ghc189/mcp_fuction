@@ -31,6 +31,7 @@ DEFAULT_REGION = os.getenv("DASHSCOPE_REGION", "cn-beijing")
 DEFAULT_TARGET_MODEL = os.getenv("BAILIAN_TTS_MODEL", "cosyvoice-v3.5-plus")
 DEFAULT_QWEN_VC_MODEL = os.getenv("BAILIAN_QWEN_VC_MODEL", "qwen3-tts-vc-2026-01-22")
 DEFAULT_INLINE_AUDIO_LIMIT = int(os.getenv("INLINE_AUDIO_BASE64_LIMIT", "300000"))
+DEFAULT_CLONE_AUDIO_SAMPLE_RATE = int(os.getenv("VOICE_CLONE_SAMPLE_RATE", "24000"))
 DEFAULT_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
 DEFAULT_HTTP_HOST = os.getenv("MCP_HOST", "0.0.0.0").strip() or "0.0.0.0"
 DEFAULT_HTTP_PORT = int(
@@ -467,14 +468,12 @@ def _video_source_to_ffmpeg_input(source: str, source_kind: str) -> str:
 
 def _speech_enhancement_filter(speech_enhancement: bool) -> str:
     if not speech_enhancement:
-        return "aresample=16000"
+        return f"aresample={DEFAULT_CLONE_AUDIO_SAMPLE_RATE}"
     return ",".join(
         [
-            "highpass=f=80",
-            "lowpass=f=7000",
-            "afftdn=nf=-25",
-            "speechnorm=e=6.25:r=0.0001:l=1",
-            "aresample=16000",
+            "highpass=f=60",
+            "afftdn=nf=-18",
+            f"aresample={DEFAULT_CLONE_AUDIO_SAMPLE_RATE}",
         ]
     )
 
@@ -507,7 +506,7 @@ def _extract_audio_segment_from_video(
         "-ac",
         "1",
         "-ar",
-        "16000",
+        str(DEFAULT_CLONE_AUDIO_SAMPLE_RATE),
         "-sample_fmt",
         "s16",
         "-af",
@@ -663,7 +662,7 @@ def create_qwen_voice_clone_from_video_url_segment(
     preferred_name: str,
     start_time: str,
     end_time: str,
-    speech_enhancement: bool = True,
+    speech_enhancement: bool = False,
     target_model: str = DEFAULT_QWEN_VC_MODEL,
     region: str = DEFAULT_REGION,
     text: str = "",
@@ -707,7 +706,7 @@ def create_qwen_voice_clone_from_local_video_segment(
     preferred_name: str,
     start_time: str,
     end_time: str,
-    speech_enhancement: bool = True,
+    speech_enhancement: bool = False,
     target_model: str = DEFAULT_QWEN_VC_MODEL,
     region: str = DEFAULT_REGION,
     text: str = "",
