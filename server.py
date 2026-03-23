@@ -114,6 +114,52 @@ def _validate_prefix(prefix: str) -> str:
     return value
 
 
+def _is_qwen_voice_id(voice_id: str) -> bool:
+    return voice_id.strip().startswith("qwen-tts-vc-")
+
+
+def _qwen_follow_up_error(tool_name: str) -> ValueError:
+    return ValueError(
+        f"{tool_name} only supports CosyVoice voice-enrollment voices created by create_voice_clone. "
+        "For Qwen voice clones returned by create_qwen_voice_clone_* tools, call "
+        "synthesize_with_cloned_voice directly with the returned voice_id and target_model. "
+        "Do not call query_voice, wait_for_voice_ready, list_voices, or delete_voice."
+    )
+
+
+def _ensure_voice_enrollment_voice_id(voice_id: str, tool_name: str) -> str:
+    clean_voice_id = voice_id.strip()
+    if not clean_voice_id:
+        raise ValueError("voice_id cannot be empty.")
+    if _is_qwen_voice_id(clean_voice_id):
+        raise _qwen_follow_up_error(tool_name)
+    return clean_voice_id
+
+
+def _resolve_synthesis_target_model(voice_id: str, target_model: str) -> str:
+    clean_voice_id = voice_id.strip()
+    requested_model = target_model.strip()
+
+    if _is_qwen_voice_id(clean_voice_id):
+        if not requested_model or requested_model == DEFAULT_TARGET_MODEL:
+            return DEFAULT_QWEN_VC_MODEL
+        if requested_model == DEFAULT_QWEN_VC_MODEL or requested_model.startswith("qwen3-tts-vc"):
+            return requested_model
+        raise ValueError(
+            "Qwen voice_id requires a Qwen TTS VC target_model. "
+            "Use the target_model returned by create_qwen_voice_clone_* or omit it and let the tool auto-select "
+            f"{DEFAULT_QWEN_VC_MODEL}."
+        )
+
+    if requested_model.startswith("qwen3-tts-vc"):
+        raise ValueError(
+            "Non-Qwen voice_id cannot be synthesized with a Qwen TTS VC target_model. "
+            "Use a voice_id returned by create_qwen_voice_clone_* or switch target_model back to the matching CosyVoice model."
+        )
+
+    return requested_model or DEFAULT_TARGET_MODEL
+
+
 def _post_customization(payload: dict[str, Any], region: str | None) -> dict[str, Any]:
     api_key = _require_api_key()
     endpoint = _http_endpoint(region)
@@ -203,13 +249,28 @@ def _create_qwen_voice(
     }
     data = _post_customization(payload, region)
     output = data.get("output", {})
+    voice_id = output.get("voice")
+    resolved_target_model = output.get("target_model", target_model)
     return {
-        "message": "Qwen voice clone created.",
-        "voice": output.get("voice"),
-        "target_model": output.get("target_model", target_model),
+        "message": "Qwen voice clone created. Use synthesize_with_cloned_voice directly; do not call query_voice or wait_for_voice_ready.",
+        "voice": voice_id,
+        "voice_id": voice_id,
+        "ready": True,
+        "target_model": resolved_target_model,
         "request_id": data.get("request_id"),
         "usage": data.get("usage", {}),
         "region": _normalize_region(region),
+        "recommended_next_tool": "synthesize_with_cloned_voice",
+        "recommended_next_args": {
+            "voice_id": voice_id,
+            "target_model": resolved_target_model,
+        },
+        "do_not_call": [
+            "query_voice",
+            "wait_for_voice_ready",
+            "list_voices",
+            "delete_voice",
+        ],
         "raw_output": output,
     }
 
@@ -396,9 +457,15 @@ def create_voice_clone(
         "message": "音色创建请求已提交。声音克隆是异步任务，请继续调用 query_voice 或 wait_for_voice_ready。",
         "voice_id": output.get("voice_id"),
         "status": output.get("status"),
+        "ready": False,
         "target_model": target_model,
         "request_id": data.get("request_id"),
         "region": _normalize_region(region),
+        "recommended_next_tool": "wait_for_voice_ready",
+        "recommended_next_args": {
+            "voice_id": output.get("voice_id"),
+            "target_model": target_model,
+        },
         "raw_output": output,
     }
 
@@ -418,6 +485,12 @@ def create_qwen_voice_clone_from_audio_base64(
 
     This is the remote-friendly option for Bailian / Function AI, because the
     caller can pass audio content directly without a public URL.
+
+    Follow-up:
+    - After success, call synthesize_with_cloned_voice directly with the returned
+      voice_id.
+    - Do not call query_voice / wait_for_voice_ready / list_voices for Qwen
+      voice clones.
     """
     data_url = _ensure_audio_data_url(
         audio_base64_or_data_url=audio_base64_or_data_url,
@@ -453,6 +526,8 @@ def create_qwen_voice_clone_from_local_file(
     - Best for local stdio deployment.
     - In Function AI, the path is resolved inside the cloud container, not on
       your personal computer.
+    - After success, call synthesize_with_cloned_voice directly with the returned
+      voice_id.
     """
     data_url, resolved_mime_type, audio_bytes = _read_local_audio_as_data_url(
         local_file_path=local_file_path,
@@ -490,6 +565,12 @@ def create_qwen_voice_clone_from_video_url_segment(
 
     This is the recommended remote-friendly workflow when the voice you want is
     inside a video.
+
+    Follow-up:
+    - After success, call synthesize_with_cloned_voice directly with the returned
+      voice_id.
+    - Do not call query_voice / wait_for_voice_ready / list_voices for Qwen
+      voice clones.
     """
     extracted = _extract_audio_segment_from_video(
         source=video_url,
@@ -530,6 +611,8 @@ def create_qwen_voice_clone_from_local_video_segment(
     - Best for local stdio deployment.
     - In Function AI, the path is resolved inside the cloud container, not on
       your personal computer.
+    - After success, call synthesize_with_cloned_voice directly with the returned
+      voice_id.
     """
     extracted = _extract_audio_segment_from_video(
         source=local_video_path,
@@ -559,17 +642,18 @@ def query_voice(
     """
     查询单个音色的状态和元数据。
     """
+    clean_voice_id = _ensure_voice_enrollment_voice_id(voice_id, "query_voice")
     payload = {
         "model": "voice-enrollment",
         "input": {
             "action": "query_voice",
-            "voice_id": voice_id.strip(),
+            "voice_id": clean_voice_id,
         },
     }
     data = _post_customization(payload, region)
     output = data.get("output", {})
     return {
-        "voice_id": output.get("voice_id", voice_id),
+        "voice_id": output.get("voice_id", clean_voice_id),
         "status": output.get("status"),
         "target_model": output.get("target_model"),
         "gmt_create": output.get("gmt_create"),
@@ -591,13 +675,14 @@ def wait_for_voice_ready(
     """
     轮询音色状态，直到完成或超时。
     """
+    clean_voice_id = _ensure_voice_enrollment_voice_id(voice_id, "wait_for_voice_ready")
     timeout = max(10, timeout_seconds)
     interval = max(1, poll_interval_seconds)
     started = time.time()
     last_result: dict[str, Any] | None = None
 
     while time.time() - started <= timeout:
-        result = query_voice(voice_id=voice_id, region=region)
+        result = query_voice(voice_id=clean_voice_id, region=region)
         last_result = result
         status = str(result.get("status") or "").upper()
         if status in READY_STATUSES:
@@ -611,7 +696,7 @@ def wait_for_voice_ready(
         time.sleep(interval)
 
     return {
-        "voice_id": voice_id,
+        "voice_id": clean_voice_id,
         "ready": False,
         "status": (last_result or {}).get("status"),
         "waited_seconds": round(time.time() - started, 2),
@@ -661,17 +746,18 @@ def delete_voice(
     """
     删除一个不再需要的音色。
     """
+    clean_voice_id = _ensure_voice_enrollment_voice_id(voice_id, "delete_voice")
     payload = {
         "model": "voice-enrollment",
         "input": {
             "action": "delete_voice",
-            "voice_id": voice_id.strip(),
+            "voice_id": clean_voice_id,
         },
     }
     data = _post_customization(payload, region)
     return {
         "message": "删除请求已提交。",
-        "voice_id": voice_id,
+        "voice_id": clean_voice_id,
         "request_id": data.get("request_id"),
         "region": _normalize_region(region),
         "raw_output": data.get("output", {}),
@@ -699,23 +785,28 @@ def synthesize_with_cloned_voice(
     if not clean_text:
         raise ValueError("text 不能为空。")
 
+    clean_voice_id = voice_id.strip()
+    if not clean_voice_id:
+        raise ValueError("voice_id cannot be empty.")
+    resolved_target_model = _resolve_synthesis_target_model(clean_voice_id, target_model)
+
     _configure_dashscope(region)
 
     from dashscope.audio.tts_v2 import SpeechSynthesizer
 
-    synthesizer = SpeechSynthesizer(model=target_model, voice=voice_id.strip())
+    synthesizer = SpeechSynthesizer(model=resolved_target_model, voice=clean_voice_id)
     audio = synthesizer.call(clean_text)
     if not isinstance(audio, (bytes, bytearray)):
         raise RuntimeError("语音合成返回了空音频。")
 
-    output_path = save_path.strip() or _default_output_path(voice_id.strip(), ".mp3")
+    output_path = save_path.strip() or _default_output_path(clean_voice_id, ".mp3")
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_bytes(audio)
 
     result: dict[str, Any] = {
-        "voice_id": voice_id,
-        "target_model": target_model,
+        "voice_id": clean_voice_id,
+        "target_model": resolved_target_model,
         "region": _normalize_region(region),
         "saved_path": str(output_file),
         "audio_bytes": len(audio),

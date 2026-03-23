@@ -211,6 +211,38 @@ Video notes:
 - This improves spoken voice clarity, but it does not fully separate vocals from background music
 - For best cloning quality, choose a segment where the target speaker is clear and background music is weaker
 
+## Workflow By Clone Type
+
+Use different follow-up steps for the two API families in this MCP:
+
+- `create_voice_clone`:
+  This is the CosyVoice `voice-enrollment` flow. It is asynchronous.
+  After creation, call `wait_for_voice_ready` or `query_voice`, then call
+  `synthesize_with_cloned_voice`.
+
+- `create_qwen_voice_clone_from_audio_base64`
+- `create_qwen_voice_clone_from_local_file`
+- `create_qwen_voice_clone_from_video_url_segment`
+- `create_qwen_voice_clone_from_local_video_segment`
+  These are Qwen voice clone flows. They are ready for synthesis immediately
+  after the create call returns success.
+  Do not call `query_voice`, `wait_for_voice_ready`, `list_voices`, or
+  `delete_voice` with a Qwen voice id such as `qwen-tts-vc-...`.
+  Call `synthesize_with_cloned_voice` directly with the returned `voice_id`
+  and `target_model`.
+
+Qwen follow-up example:
+
+```json
+{
+  "text": "时光如白驹过隙，转瞬即逝。",
+  "voice_id": "qwen-tts-vc-demo_voice_01-voice-20260323xxxx",
+  "target_model": "qwen3-tts-vc-2026-01-22",
+  "region": "cn-beijing",
+  "inline_base64": true
+}
+```
+
 ## LobeHub HTTP Mode
 
 LobeHub expects Streamable HTTP, not SSE.
@@ -242,7 +274,6 @@ LobeHub example config:
 {
   "mcpServers": {
     "voice-clone-mcp": {
-      "url": "https://your-domain.example.com/",
       "url": "https://your-domain.example.com/mcp",
       "type": "streamable-http",
       "headers": {
